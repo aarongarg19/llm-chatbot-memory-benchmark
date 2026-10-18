@@ -3,6 +3,7 @@ import os
 import re
 import time
 import uuid
+from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -22,10 +23,27 @@ from app.memory.base import MemoryProvider
 from app.memory.factory import create_memory_provider
 
 
+memory_provider: MemoryProvider | None = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialize the database and memory provider when the app starts."""
+    global memory_provider
+
+    init_db()
+    memory_provider = create_memory_provider()
+
+    yield
+
+    memory_provider = None
+
+
 app = FastAPI(
     title="LLM Chatbot Memory Benchmark",
     description="Chatbot with persistent conversations and pluggable memory",
     version="0.4.1",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -40,15 +58,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-memory_provider: MemoryProvider | None = None
-
-
-@app.on_event("startup")
-def startup():
-    global memory_provider
-    init_db()
-    memory_provider = create_memory_provider()
 
 
 class ChatRequest(BaseModel):
@@ -72,7 +81,7 @@ class MessageResponse(BaseModel):
 
 
 def extract_explicit_memory(message: str) -> str | None:
-    """Save simple facts explicitly stated by the user."""
+    """Extract simple facts explicitly stated by the user."""
     text = message.strip()
 
     patterns = [
@@ -91,7 +100,10 @@ def extract_explicit_memory(message: str) -> str | None:
     if len(text) > 500:
         return None
 
-    if any(re.fullmatch(pattern, text, re.IGNORECASE) for pattern in patterns):
+    if any(
+        re.fullmatch(pattern, text, re.IGNORECASE)
+        for pattern in patterns
+    ):
         return text
 
     return None
@@ -163,7 +175,7 @@ async def chat(request: ChatRequest):
 
     retrieval_ms = (time.perf_counter() - retrieval_start) * 1000
 
-    # Save explicit facts as long-term memories.
+    # Store explicit facts for use in future conversations.
     if request.user_id:
         fact = extract_explicit_memory(message)
 
@@ -211,7 +223,10 @@ async def chat(request: ChatRequest):
         memory_mode=os.getenv("MEMORY_MODE", "none").strip().lower(),
         retrieval_ms=round(retrieval_ms, 2),
         llm_ms=round(llm_ms, 2),
-        total_ms=round((time.perf_counter() - total_start) * 1000, 2),
+        total_ms=round(
+            (time.perf_counter() - total_start) * 1000,
+            2,
+        ),
     )
 
 
