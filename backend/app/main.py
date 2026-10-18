@@ -1,6 +1,9 @@
 
-import uuid
 import os
+import re
+import time
+import uuid
+
 import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,13 +18,14 @@ from app.database import (
     get_conversation_messages,
 )
 from app.llm import generate_response
-from app.memory.base import EmptyMemoryProvider, MemoryProvider
+from app.memory.base import MemoryProvider
+from app.memory.factory import create_memory_provider
 
 
 app = FastAPI(
     title="LLM Chatbot Memory Benchmark",
-    description="Custom chatbot with persistent conversations and pluggable RAG/OKF memory",
-    version="0.3.0",
+    description="Chatbot with persistent conversations and pluggable memory",
+    version="0.4.1",
 )
 
 app.add_middleware(
@@ -37,13 +41,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Temporary provider until the RAG and OKF implementations are integrated.
-memory_provider: MemoryProvider = EmptyMemoryProvider()
+memory_provider: MemoryProvider | None = None
 
 
 @app.on_event("startup")
 def startup():
+    global memory_provider
     init_db()
+    memory_provider = create_memory_provider()
 
 
 class ChatRequest(BaseModel):
@@ -55,6 +60,10 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     conversation_id: str
     reply: str
+    memory_mode: str
+    retrieval_ms: float
+    llm_ms: float
+    total_ms: float
 
 
 class MessageResponse(BaseModel):
@@ -62,11 +71,36 @@ class MessageResponse(BaseModel):
     messages: list[dict]
 
 
+def extract_explicit_memory(message: str) -> str | None:
+    """Save simple facts explicitly stated by the user."""
+    text = message.strip()
+
+    patterns = [
+        r"my\s+.+\s+(?:is|are)\s+.+",
+        r"i\s+am\s+.+",
+        r"i'm\s+.+",
+        r"i\s+live\s+.+",
+        r"i\s+prefer\s+.+",
+        r"i\s+like\s+.+",
+        r"i\s+love\s+.+",
+        r"i\s+study\s+.+",
+        r"i\s+work\s+.+",
+        r"remember\s+that\s+.+",
+    ]
+
+    if len(text) > 500:
+        return None
+
+    if any(re.fullmatch(pattern, text, re.IGNORECASE) for pattern in patterns):
+        return text
+
+    return None
+
+
 @app.get("/")
 def home():
     return {
         "project": "LLM Chatbot Memory Benchmark",
-        "module": "LLM and Backend",
         "status": "running",
     }
 
@@ -75,12 +109,14 @@ def home():
 def health():
     return {
         "status": "healthy",
-        "memory_mode": os.getenv("MEMORY_MODE", "none").strip().lower()
+        "memory_mode": os.getenv("MEMORY_MODE", "none").strip().lower(),
+        "llm_model": os.getenv("OLLAMA_MODEL", "qwen2.5:3b"),
     }
 
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
+    total_start = time.perf_counter()
     message = request.message.strip()
 
     if not message:
@@ -89,27 +125,27 @@ async def chat(request: ChatRequest):
             detail="Message cannot be empty or whitespace only.",
         )
 
+    if memory_provider is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Memory provider has not been initialized.",
+        )
+
     conversation_id = request.conversation_id
 
-    # Create a new conversation when no ID is supplied.
     if conversation_id is None:
         conversation_id = str(uuid.uuid4())
         create_conversation(conversation_id)
-
     elif not conversation_exists(conversation_id):
         raise HTTPException(
             status_code=404,
             detail="Conversation not found.",
         )
 
-    # Load recent conversation history from SQLite.
-    history = get_recent_messages(
-        conversation_id,
-        limit=12,
-    )
+    history = get_recent_messages(conversation_id, limit=12)
 
-    # Retrieve long-term memories through the shared interface.
     memories = []
+    retrieval_start = time.perf_counter()
 
     if request.user_id:
         try:
@@ -119,19 +155,34 @@ async def chat(request: ChatRequest):
                 limit=5,
             )
             memories = [item.text for item in retrieved]
-
         except Exception as exc:
             raise HTTPException(
                 status_code=503,
                 detail="Memory retrieval failed.",
             ) from exc
 
-    # Save the user message before generating a response.
-    save_message(
-        conversation_id,
-        "user",
-        message,
-    )
+    retrieval_ms = (time.perf_counter() - retrieval_start) * 1000
+
+    # Save explicit facts as long-term memories.
+    if request.user_id:
+        fact = extract_explicit_memory(message)
+
+        if fact:
+            try:
+                await memory_provider.remember(
+                    user_id=request.user_id,
+                    text=fact,
+                    metadata={"source": "explicit_user_statement"},
+                )
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Memory storage failed.",
+                ) from exc
+
+    save_message(conversation_id, "user", message)
+
+    llm_start = time.perf_counter()
 
     try:
         reply = await generate_response(
@@ -139,29 +190,28 @@ async def chat(request: ChatRequest):
             history,
             memories,
         )
-
     except httpx.HTTPError as exc:
         raise HTTPException(
             status_code=503,
             detail="Could not connect to Ollama. Check that it is running.",
         ) from exc
-
     except (KeyError, ValueError) as exc:
         raise HTTPException(
             status_code=502,
             detail="The LLM returned an invalid response.",
         ) from exc
 
-    # Save the assistant response.
-    save_message(
-        conversation_id,
-        "assistant",
-        reply,
-    )
+    llm_ms = (time.perf_counter() - llm_start) * 1000
+
+    save_message(conversation_id, "assistant", reply)
 
     return ChatResponse(
         conversation_id=conversation_id,
         reply=reply,
+        memory_mode=os.getenv("MEMORY_MODE", "none").strip().lower(),
+        retrieval_ms=round(retrieval_ms, 2),
+        llm_ms=round(llm_ms, 2),
+        total_ms=round((time.perf_counter() - total_start) * 1000, 2),
     )
 
 
@@ -176,9 +226,7 @@ def read_conversation(conversation_id: str):
             detail="Conversation not found.",
         )
 
-    messages = get_conversation_messages(conversation_id)
-
     return MessageResponse(
         conversation_id=conversation_id,
-        messages=messages,
+        messages=get_conversation_messages(conversation_id),
     )

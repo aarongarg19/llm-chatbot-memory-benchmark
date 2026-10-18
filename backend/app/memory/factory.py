@@ -10,12 +10,17 @@ def create_memory_provider() -> MemoryProvider:
     if mode == "none":
         return EmptyMemoryProvider()
 
+    if mode == "sqlite":
+        from app.memory.sqlite_memory import SQLiteMemoryProvider
+
+        return SQLiteMemoryProvider()
+
     if mode == "rag":
         try:
             from app.memory.rag import RAGMemoryProvider
         except ImportError as exc:
             raise RuntimeError(
-                "RAG mode is selected, but the RAG provider "
+                "RAG mode is selected, but app.memory.rag "
                 "has not been integrated yet."
             ) from exc
 
@@ -26,7 +31,7 @@ def create_memory_provider() -> MemoryProvider:
             from app.memory.okf import OKFMemoryProvider
         except ImportError as exc:
             raise RuntimeError(
-                "OKF mode is selected, but the OKF provider "
+                "OKF mode is selected, but app.memory.okf "
                 "has not been integrated yet."
             ) from exc
 
@@ -34,5 +39,5 @@ def create_memory_provider() -> MemoryProvider:
 
     raise ValueError(
         f"Invalid MEMORY_MODE: {mode}. "
-        "Choose none, rag, or okf."
+        "Choose none, sqlite, rag, or okf."
     )
