@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+ENV/
+# Environment variables
+.env
+.env.*
+
+# Databases
+*.db
+
+# Test artifacts
+.pytest_cache/
+.coverage
+
+# Frontend dependencies and builds
+node_modules/
+.next/
+dist/
+build/
+
+# IDE
+.vscode/
