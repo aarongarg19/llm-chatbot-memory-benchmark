@@ -5,3 +5,4 @@ httpx
 pydantic
 pytest
 pytest-asyncio
+sentence-transformers>=3.0.0
