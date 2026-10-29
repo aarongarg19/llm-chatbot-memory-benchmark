@@ -1,6 +1,6 @@
 # LLM Chatbot Memory Benchmark
 
-A custom LLM chatbot project that aims to compare **Retrieval-Augmented Generation (RAG)** and **Open Format Knowledge (OFK)** approaches for conversational memory.
+A custom LLM chatbot project that aims to compare **Retrieval-Augmented Generation (RAG)** and **Open Knowledge Format (OKF)** approaches for conversational memory.
 
 ## Overview
 
